@@ -3,11 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Coupon;
+use App\Exceptions\PaymentGateChargeException;
 use App\Http\Requests\OrderRequest;
 use App\Lesson;
 use App\Mail\OrderConfirmation;
 use App\Order;
 use App\Product;
+use App\Services\PaymentGateway;
 use App\User;
 use App\Video;
 use Exception;
@@ -31,46 +33,34 @@ class OrderController extends Controller
         ]);
     }
 
-    public function store(OrderRequest $request)
+    public function store(OrderRequest $request, PaymentGateway $paymentGateway)
     {
-        try {
-            $product = Product::findOrFail($request->get('product_id'));
 
-            Stripe::setApiKey(config('services.stripe.secret'));
+        $product = Product::findOrFail($request->get('product_id'));
 
-            $order = new Order([
-                'product_id' => $product->id,
-                'total' => $product->price,
-            ]);
 
-            $this->applyCoupon($order);
 
-            $charge = Charge::create([
-                "amount" => $order->totalInCents(),
-                "currency" => "usd",
-                "source" => $request->get('stripeToken'),
-                "description" => "Confident Laravel - " . $order->product->name,
-                "receipt_email" => $request->get('stripeEmail')
-            ]);
+        $order = new Order([
+            'product_id' => $product->id,
+            'total' => $product->price,
+        ]);
 
-            $user = User::createFromPurchase($request->get('stripeEmail'), $charge->id);
+        $this->applyCoupon($order);
 
-            $order->user_id = $user->id;
-            $order->stripe_id = $charge->id;
-            $order->save();
+        $charge_id = $paymentGateway->charge($request->get('stripeToken'), $order);
 
-            event('order.placed', $order);
 
-            Auth::login($user, true);
-            Mail::to($user->email)->send(new OrderConfirmation($order));
-        } catch (Card $e) {
-            $data = $e->getJsonBody();
-            Log::error('Card failed: ', $data);
-            $template = 'partials.errors.charge_failed';
-            $data = $data['error'];
+        $user = User::createFromPurchase($request->get('stripeEmail'), $charge_id);
 
-            return view('errors.generic', compact('template', 'data'));
-        }
+        $order->user_id = $user->id;
+        $order->stripe_id = $charge_id;
+        $order->save();
+
+        event('order.placed', $order);
+
+        Auth::login($user, true);
+        Mail::to($user->email)->send(new OrderConfirmation($order));
+
 
         return redirect('/users/edit');
     }
